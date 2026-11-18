@@ -33,7 +33,7 @@ const settings = definePluginSettings({
     allowBadgeTracking: {
         type: OptionType.BOOLEAN,
         description: "Still send the events needed for badges to track your progress (eg: hours played, hours streamed)",
-        default: true,
+        default: false,
         restartNeeded: true,
         disabled() { return !this.store.disableAnalytics; }
     }
