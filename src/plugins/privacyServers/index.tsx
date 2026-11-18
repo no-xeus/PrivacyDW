@@ -11,6 +11,8 @@ import definePlugin, { OptionType } from "@utils/types";
 import { RestAPI, showToast } from "@webpack/common";
 
 import { adopt, handle, idInstance, instanceFor, logger, mapSelf, Native, onlyPrivacyIds, unmapSelf } from "./bridge";
+import { joinFromInput } from "./components/JoinFlow";
+import { withPrivacyButton } from "./components/ServerListButton";
 import { SettingsPanel } from "./components/Settings";
 
 export const settings = definePluginSettings({
@@ -183,6 +185,29 @@ export default definePlugin({
     enabledByDefault: true,
     settings,
 
+    patches: [
+        {
+            // Discover button in the server list: render the privacy-servers button right after it.
+            find: '"guild-discover-button"',
+            replacement: {
+                match: /return(\(0,\i\.jsx\)\((\i),\{id:"guild-discover-button",.+?icon:\i\.CompassIcon\}\))/,
+                replace: "return $self.withPrivacyButton($2,$1)"
+            }
+        },
+        {
+            // "Join a Server" submit: instance links and addresses are handled by the plugin and
+            // never reach Discord (which would otherwise resolve the link's last segment as a code).
+            find: '"hTKzmak"',
+            replacement: {
+                match: /(let (\i)=\i\.trim\(\);)(if\(""===\2\)return void (\i)\()(?=.{0,1500}?callback:\i=>\{(\i)\(\))/,
+                replace: "$1if($self.joinFromInput($2,$4,$5))return;$3"
+            }
+        }
+    ],
+
+    withPrivacyButton,
+    joinFromInput,
+
     start() {
         wrapRestApi();
 
@@ -190,7 +215,7 @@ export default definePlugin({
         void eventLoop();
         void Native.connectAll();
         void Native.vaultStatus().then(s => {
-            if (s === "locked") showToast({ text: "PrivacyDW is locked. Unlock it in the PrivacyServers plugin settings.", variant: "default" });
+            if (s === "locked") showToast({ text: "PrivacyDW is locked. Unlock it with the shield button under Discover in the server list.", variant: "default" });
         });
     },
 

@@ -108,8 +108,11 @@ async function known(url: unknown): Promise<string> {
 function normalizeUrl(raw: string): string | null {
     const s = raw.trim();
     try {
-        const u = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`);
-        const local = ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+        const LOCAL = ["localhost", "127.0.0.1", "[::1]"];
+        // Without a scheme: https, except plain http for local development hosts.
+        const host = s.split(/[/:?#]/)[0].toLowerCase();
+        const u = new URL(/^https?:\/\//i.test(s) ? s : `${LOCAL.includes(host) ? "http" : "https"}://${s}`);
+        const local = LOCAL.includes(u.hostname);
         if (u.protocol === "http:" && !local) return null; // plain http only for local dev
         return u.origin;
     } catch {
@@ -121,12 +124,17 @@ export async function listInstances(): Promise<SavedInstance[]> {
     return loadInstances();
 }
 
-export async function addInstance(_: unknown, raw: string): Promise<Result<SavedInstance>> {
+/** Fetches an instance's public info without adding it (to show before the user confirms). */
+export async function probeInstance(_: unknown, raw: string): Promise<Result<SavedInstance>> {
     const url = normalizeUrl(String(raw));
     if (!url) return { ok: false, code: "invalid_url", message: "Invalid URL (https required for remote instances)" };
+    return probe(url);
+}
+
+async function probe(url: string): Promise<Result<SavedInstance>> {
     let info: InstanceInfo;
     try {
-        const res = await fetch(`${url}/.well-known/privacy-instance`, { signal: AbortSignal.timeout(8000) });
+        const res = await fetch(`${url}/.well-known/privacy-instance`, { signal: AbortSignal.timeout(8000), redirect: "error" });
         if (!res.ok) return { ok: false, code: "http_error", message: `Instance responded ${res.status}` };
         info = await res.json();
     } catch (e) {
@@ -134,6 +142,15 @@ export async function addInstance(_: unknown, raw: string): Promise<Result<Saved
     }
     if (typeof info?.name !== "string" || info.protocolVersion !== PROTOCOL_VERSION)
         return { ok: false, code: "unsupported", message: "Not a supported privacy instance" };
+    return { ok: true, data: { url, info } };
+}
+
+export async function addInstance(_: unknown, raw: string): Promise<Result<SavedInstance>> {
+    const url = normalizeUrl(String(raw));
+    if (!url) return { ok: false, code: "invalid_url", message: "Invalid URL (https required for remote instances)" };
+    const probed = await probe(url);
+    if (!probed.ok) return probed;
+    const { info } = probed.data;
     const list = (await loadInstances()).filter(i => i.url !== url);
     const saved = { url, info };
     list.push(saved);
@@ -164,6 +181,8 @@ async function raw<T>(base: string, method: Method, path: string, body?: unknown
                 ...(reason ? { "x-audit-log-reason": encodeURIComponent(reason.slice(0, 512)) } : {})
             },
             body: body !== undefined ? JSON.stringify(body) : undefined,
+            // A 307/308 would re-send credentials to wherever it points; instances never redirect.
+            redirect: "error",
             signal: AbortSignal.timeout(15_000)
         });
         const text = await res.text();
@@ -316,10 +335,23 @@ export async function createGuild(_: unknown, url: string, name: string) {
     return authed<any>(await known(url), "POST", "/guilds", { name: String(name) });
 }
 
+/** An invite code, invite link, or daily join code (`ABCD-EFGH`, spaces and case don't matter). */
+function inviteCode(code: unknown): string | null {
+    const c = (String(code).trim().split("/").pop() ?? "").replace(/\s+/g, "");
+    return /^[A-Za-z0-9_-]{4,32}$/.test(c) ? c : null;
+}
+
 export async function joinInvite(_: unknown, url: string, code: string) {
-    const c = String(code).trim().split("/").pop() ?? "";
-    if (!/^[A-Za-z0-9_-]{4,32}$/.test(c)) return { ok: false, code: "invalid_invite", message: "Invalid invite code" } as Result<any>;
+    const c = inviteCode(code);
+    if (!c) return { ok: false, code: "invalid_invite", message: "Invalid invite code" } as Result<any>;
     return authed<any>(await known(url), "POST", `/invites/${c}`);
+}
+
+/** What an invite leads to; works before signing in (like Discord's invite preview). */
+export async function previewInvite(_: unknown, url: string, code: string) {
+    const c = inviteCode(code);
+    if (!c) return { ok: false, code: "invalid_invite", message: "Invalid invite code" } as Result<any>;
+    return strip(await raw<any>(await known(url), "GET", `/invites/${c}`));
 }
 
 // ---------- Gateway ----------

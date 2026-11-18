@@ -7,22 +7,22 @@
 import { Button } from "@components/Button";
 import { Heading } from "@components/Heading";
 import { Paragraph } from "@components/Paragraph";
-import { addGuild, guildInstance, Native } from "@plugins/privacyServers/bridge";
+import { addGuild, guildInstance, lockVault, Native, removeInstance, resetVault, signOut } from "@plugins/privacyServers/bridge";
 import type { InstanceStatus, VaultStatus } from "@plugins/privacyServers/types";
 import { copyWithToast } from "@utils/discord";
 import { ChannelStore, GuildStore, React, showToast, TextInput, useEffect, useState } from "@webpack/common";
 
-const gap = { display: "flex", flexDirection: "column", gap: 8 } as const;
-const row = { display: "flex", gap: 8, alignItems: "center" } as const;
+export const gap = { display: "flex", flexDirection: "column", gap: 8 } as const;
+export const row = { display: "flex", gap: 8, alignItems: "center" } as const;
 
-function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): [T | null, () => void] {
+export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): [T | null, () => void] {
     const [value, setValue] = useState<T | null>(null);
     const [tick, setTick] = useState(0);
     useEffect(() => { let live = true; fn().then(v => live && setValue(v)); return () => { live = false; }; }, [...deps, tick]);
     return [value, () => setTick(t => t + 1)];
 }
 
-function Field({ label, ...props }: { label: string; value: string; onChange(v: string): void; type?: string; placeholder?: string; }) {
+export function Field({ label, ...props }: { label: string; value: string; onChange(v: string): void; type?: string; placeholder?: string; }) {
     return (
         <div style={{ ...gap, gap: 4, flex: 1 }}>
             <Heading tag="h5">{label}</Heading>
@@ -31,7 +31,7 @@ function Field({ label, ...props }: { label: string; value: string; onChange(v: 
     );
 }
 
-function VaultSection({ status, onChange }: { status: VaultStatus; onChange(): void; }) {
+export function VaultSection({ status, onChange }: { status: VaultStatus; onChange(): void; }) {
     const [pw, setPw] = useState("");
     const [confirm, setConfirm] = useState("");
     const [busy, setBusy] = useState(false);
@@ -39,7 +39,7 @@ function VaultSection({ status, onChange }: { status: VaultStatus; onChange(): v
     if (status === "unlocked") return (
         <div style={row}>
             <Paragraph>🔓 Vault unlocked. Sign-ins to your instances are available.</Paragraph>
-            <Button size="small" variant="secondary" onClick={async () => { await Native.vaultLock(); onChange(); }}>Lock</Button>
+            <Button size="small" variant="secondary" onClick={async () => { await lockVault(); onChange(); }}>Lock</Button>
         </div>
     );
 
@@ -71,7 +71,7 @@ function VaultSection({ status, onChange }: { status: VaultStatus; onChange(): v
                 {!creating && (
                     <Button variant="dangerSecondary" size="small" onClick={async () => {
                         if (!window.confirm("Forget your PrivacyDW password? Saved sign-ins are erased; instances are kept.")) return;
-                        await Native.vaultReset();
+                        await resetVault();
                         onChange();
                     }}>Forgot password? Reset</Button>
                 )}
@@ -80,7 +80,7 @@ function VaultSection({ status, onChange }: { status: VaultStatus; onChange(): v
     );
 }
 
-function SignIn({ inst, onDone }: { inst: InstanceStatus; onDone(): void; }) {
+export function SignIn({ inst, onDone }: { inst: InstanceStatus; onDone(): void; }) {
     const [mode, setMode] = useState<"login" | "register">("login");
     const [name, setName] = useState("");
     const [pw, setPw] = useState("");
@@ -164,9 +164,40 @@ function Profile({ inst }: { inst: InstanceStatus; }) {
     );
 }
 
+/** A server's daily join code: for people who were given only the instance's address. */
+function DailyCode({ inst, guildId }: { inst: InstanceStatus; guildId: string; }) {
+    const [info, setInfo] = useState<{ code: string | null; expires_at: string | null; rotation_hours: number; } | null>(null);
+    const [hours, setHours] = useState("");
+    const load = async (method: "GET" | "PATCH" = "GET", body?: unknown) => {
+        const r = await Native.rest(inst.url, method, `/guilds/${guildId}/join-code`, body);
+        if (!r.ok) return method === "GET" ? setInfo(null) : showToast({ text: r.message, variant: "critical" });
+        setInfo(r.data);
+        setHours(String(r.data.rotation_hours));
+    };
+    useEffect(() => { void load(); }, [guildId]);
+    if (!info) return null;
+
+    const until = info.expires_at ? new Date(info.expires_at).toLocaleString() : null;
+    return (
+        <div style={{ ...gap, gap: 4, paddingLeft: 12 }}>
+            <div style={row}>
+                <Paragraph style={{ flex: 1 }}>
+                    {info.code ? <>Daily code <b style={{ fontFamily: "var(--font-code)" }}>{info.code}</b> · changes {until}</> : "Daily code off"}
+                </Paragraph>
+                {info.code && <Button size="small" variant="secondary" onClick={() => copyWithToast(info.code!, "Daily code copied")}>Copy code</Button>}
+            </div>
+            <div style={{ ...row, alignItems: "flex-end" }}>
+                <Field label="New code every (hours, 0 = off)" value={hours} onChange={setHours} />
+                <Button size="small" disabled={!/^\d+$/.test(hours) || Number(hours) === info.rotation_hours}
+                    onClick={() => load("PATCH", { rotation_hours: Number(hours) })}>Save</Button>
+                <Button size="small" variant="secondary" disabled={!info.code} onClick={() => load("PATCH", { regenerate: true })}>New code now</Button>
+            </div>
+        </div>
+    );
+}
+
 function ServerActions({ inst }: { inst: InstanceStatus; }) {
     const [newName, setNewName] = useState("");
-    const [invite, setInvite] = useState("");
     const guilds = Object.values(GuildStore.getGuilds()).filter(g => guildInstance.get(g.id) === inst.url);
 
     const create = async () => {
@@ -176,36 +207,32 @@ function ServerActions({ inst }: { inst: InstanceStatus; }) {
         setNewName("");
         showToast({ text: `Created ${r.data.name}`, variant: "success" });
     };
-    const join = async () => {
-        const r = await Native.joinInvite(inst.url, invite);
-        if (!r.ok) return showToast({ text: r.message, variant: "critical" });
-        await addGuild(inst.url, r.data);
-        setInvite("");
-        showToast({ text: `Joined ${r.data.name}`, variant: "success" });
-    };
 
     return (
         <div style={gap}>
+            <Paragraph>
+                To join a server, use Discord's <b>Add a Server</b> → <b>Join a Server</b> and paste an invite link,
+                or just the instance address (you'll be asked for the server's daily code).
+            </Paragraph>
             <div style={{ ...row, alignItems: "flex-end" }}>
                 <Field label="New server name" value={newName} onChange={setNewName} />
                 <Button disabled={!newName.trim()} onClick={create}>Create server</Button>
             </div>
-            <div style={{ ...row, alignItems: "flex-end" }}>
-                <Field label="Invite code" value={invite} onChange={setInvite} />
-                <Button disabled={!invite.trim()} onClick={join}>Join</Button>
-            </div>
             {guilds.length > 0 && <Heading tag="h5">Your servers here</Heading>}
             {guilds.map(g => (
-                <div key={g.id} style={row}>
-                    <Paragraph style={{ flex: 1 }}>{g.name}</Paragraph>
-                    <Button size="small" variant="secondary" onClick={async () => {
-                        // Same call Discord's own invite dialog makes (routed to the instance).
-                        const channel = Object.values(ChannelStore.getMutableGuildChannelsForGuild(g.id)).find(c => c.type === 0);
-                        if (!channel) return showToast({ text: "This server has no text channel to invite to", variant: "critical" });
-                        const r = await Native.rest(inst.url, "POST", `/channels/${channel.id}/invites`, { max_age: 7 * 24 * 3600 });
-                        if (!r.ok) return showToast({ text: r.message, variant: "critical" });
-                        copyWithToast(r.data.code, "Invite code copied (valid for 7 days)");
-                    }}>Copy invite</Button>
+                <div key={g.id} style={{ ...gap, gap: 4 }}>
+                    <div style={row}>
+                        <Paragraph style={{ flex: 1 }}><b>{g.name}</b></Paragraph>
+                        <Button size="small" variant="secondary" onClick={async () => {
+                            // Same call Discord's own invite dialog makes (routed to the instance).
+                            const channel = Object.values(ChannelStore.getMutableGuildChannelsForGuild(g.id)).find(c => c.type === 0);
+                            if (!channel) return showToast({ text: "This server has no text channel to invite to", variant: "critical" });
+                            const r = await Native.rest(inst.url, "POST", `/channels/${channel.id}/invites`, { max_age: 7 * 24 * 3600 });
+                            if (!r.ok) return showToast({ text: r.message, variant: "critical" });
+                            copyWithToast(`${inst.url}/invite/${r.data.code}`, "Invite link copied (valid for 7 days)");
+                        }}>Copy invite link</Button>
+                    </div>
+                    <DailyCode inst={inst} guildId={g.id} />
                 </div>
             ))}
         </div>
@@ -222,10 +249,10 @@ function InstanceCard({ inst, onChange }: { inst: InstanceStatus; onChange(): vo
             <Paragraph>{inst.url}{inst.user ? ` · signed in as ${inst.user.username}` : ""}</Paragraph>
             {inst.signedIn ? <><ServerActions inst={inst} /><Profile inst={inst} /></> : <SignIn inst={inst} onDone={onChange} />}
             <div style={row}>
-                {inst.signedIn && <Button size="small" variant="secondary" onClick={async () => { await Native.logout(inst.url); onChange(); }}>Sign out</Button>}
+                {inst.signedIn && <Button size="small" variant="secondary" onClick={async () => { await signOut(inst.url); onChange(); }}>Sign out</Button>}
                 <Button size="small" variant="dangerSecondary" onClick={async () => {
                     if (!window.confirm(`Remove ${inst.name}? You will be signed out.`)) return;
-                    await Native.removeInstance(inst.url);
+                    await removeInstance(inst.url);
                     onChange();
                 }}>Remove instance</Button>
             </div>

@@ -135,6 +135,43 @@ export async function handle(ev: PrivacyEvent) {
     }
 }
 
+/**
+ * Removes an instance's servers from Discord's stores (as if you left them), right away: after
+ * signing out, removing the instance, or locking the vault. `undefined` = every instance.
+ */
+export function dropInstance(instance?: string) {
+    for (const [guild, inst] of [...guildInstance]) {
+        if (instance !== undefined && inst !== instance) continue;
+        guildInstance.delete(guild);
+        dispatchGateway("GUILD_DELETE", { id: guild, unavailable: false });
+    }
+}
+
+/** Servers you're in on an instance (as currently loaded). */
+export function guildsOf(instance: string): string[] {
+    return [...guildInstance].filter(([, i]) => i === instance).map(([g]) => g);
+}
+
+export async function signOut(url: string) {
+    await Native.logout(url);
+    dropInstance(url);
+}
+
+export async function removeInstance(url: string) {
+    await Native.removeInstance(url);
+    dropInstance(url);
+}
+
+export async function lockVault() {
+    await Native.vaultLock();
+    dropInstance();
+}
+
+export async function resetVault() {
+    await Native.vaultReset();
+    dropInstance();
+}
+
 // Used by the settings panel after creating/joining a server (the gateway may deliver it too).
 export async function addGuild(instance: string, guild: any) {
     if (!guildInstance.has(guild.id)) await ingest(instance, "GUILD_CREATE", guild);
